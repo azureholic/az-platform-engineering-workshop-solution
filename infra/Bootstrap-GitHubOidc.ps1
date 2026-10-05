@@ -123,7 +123,10 @@ foreach ($environment in $Environments) {
     Set-RoleAssignment -PrincipalId $identity.principalId -Role 'Contributor' -Scope $workloadScope
     Set-RoleAssignment -PrincipalId $identity.principalId -Role 'Network Contributor' -Scope $hubScope
 
-    $subject = "repo:${repoSlug}:environment:$environment"
+    # GitHub's OIDC sub claim may carry immutable owner/repo ids; the repo reports the exact prefix it will present.
+    $subjectPrefix = gh api "repos/$repoSlug/actions/oidc/customization/sub" --jq '.sub_claim_prefix // empty' 2>$null
+    if (-not $subjectPrefix) { $subjectPrefix = "repo:$repoSlug" }
+    $subject = "${subjectPrefix}:environment:$environment"
     $credentialName = "github-$environment"
     $credential = az identity federated-credential show --identity-name $identityName --resource-group $resourceGroup `
         --name $credentialName -o json 2>$null | ConvertFrom-Json
