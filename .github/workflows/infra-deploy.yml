@@ -1,0 +1,132 @@
+name: Deploy infrastructure
+
+# Staged pipeline: lint -> deploy-test (no gate) -> deploy-prod (reviewer-gated, main only).
+# Both stages deploy the same template (infra/workload/main.bicep: spoke VNet + hub peering,
+# Container Apps environment and apps, Azure SQL, managed identities, private endpoints and
+# Private DNS); only the parameter file differs. Each environment's resource group is created
+# once up front by infra/workload/Deploy-Workload.ps1, and the OIDC identities by
+# infra/Bootstrap-GitHubOidc.ps1.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - infra/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-deploy
+  cancel-in-progress: false
+
+env:
+  WORKLOAD_TEMPLATE: infra/workload/main.bicep
+
+jobs:
+  lint:
+    name: Lint Bicep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Lint and build templates
+        run: |
+          az bicep lint --file "$WORKLOAD_TEMPLATE"
+          az bicep lint --file infra/main.bicep
+          az bicep build-params --file infra/workload/main.test.bicepparam --stdout > /dev/null
+          az bicep build-params --file infra/workload/main.prod.bicepparam --stdout > /dev/null
+
+  deploy-test:
+    name: Deploy test
+    needs: lint
+    runs-on: ubuntu-latest
+    environment: test
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      PARAMETER_FILE: infra/workload/main.test.bicepparam
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if
+        run: |
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$WORKLOAD_TEMPLATE" \
+            --parameters "$PARAMETER_FILE" \
+            --no-pretty-print -o json > whatif.json
+          {
+            echo "### What-if: test (\`$RESOURCE_GROUP\`)"
+            echo
+            echo '| Change | Resource |'
+            echo '| --- | --- |'
+            jq -r '.changes[] | "| \(.changeType) | \(.resourceId | sub("^.*/resourceGroups/"; "")) |"' whatif.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "gha-${{ github.run_id }}-test" \
+            --template-file "$WORKLOAD_TEMPLATE" \
+            --parameters "$PARAMETER_FILE" \
+            --query properties.outputs -o json
+
+  deploy-prod:
+    name: Deploy prod
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      PARAMETER_FILE: infra/workload/main.prod.bicepparam
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if
+        run: |
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file "$WORKLOAD_TEMPLATE" \
+            --parameters "$PARAMETER_FILE" \
+            --no-pretty-print -o json > whatif.json
+          {
+            echo "### What-if: prod (\`$RESOURCE_GROUP\`)"
+            echo
+            echo '| Change | Resource |'
+            echo '| --- | --- |'
+            jq -r '.changes[] | "| \(.changeType) | \(.resourceId | sub("^.*/resourceGroups/"; "")) |"' whatif.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "gha-${{ github.run_id }}-prod" \
+            --template-file "$WORKLOAD_TEMPLATE" \
+            --parameters "$PARAMETER_FILE" \
+            --query properties.outputs -o json
