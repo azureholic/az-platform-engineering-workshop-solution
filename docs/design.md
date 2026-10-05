@@ -156,6 +156,15 @@ adding it later means choosing which environment the hub resolves, or a DNS reso
 **`test` is preserved**: its parameter file reproduces the values already deployed, so re-deploying
 it is a no-op.
 
+**Deployment flow.** `infra/main.bicep` (subscription scope) only creates an environment's resource
+group, once. Everything else, including the spoke VNet and its hub peering, is deployed by
+`infra/workload/main.bicep` at resource-group scope, so the per-environment CI identity
+(Contributor on its resource group, Network Contributor on the hub resource group) can deploy
+the complete environment. The staged pipeline
+([infra-deploy.yml](../.github/workflows/infra-deploy.yml)) runs `lint`, then `deploy-test`, then
+`deploy-prod`; each deploy job logs in with OIDC, posts the what-if to the job summary, then deploys.
+The `prod` GitHub Environment requires a reviewer and is restricted to `main`.
+
 ## 7. Review outcome
 
 Challenged by an independent review; resolved as follows:

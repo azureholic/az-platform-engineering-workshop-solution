@@ -147,16 +147,34 @@ foreach ($environment in $Environments) {
         Write-Host "  = federated credential $credentialName ($subject)"
     }
 
-    # PUT on a GitHub Environment is an upsert; prod carries a required reviewer, test has no protection.
+    # PUT on a GitHub Environment is an upsert; prod carries a required reviewer and is restricted to main,
+    # test has no protection.
     $body = if ($environment -eq 'prod') {
-        @{ reviewers = @(@{ type = 'User'; id = $reviewerId }) }
+        @{
+            reviewers                = @(@{ type = 'User'; id = $reviewerId })
+            deployment_branch_policy = @{ protected_branches = $false; custom_branch_policies = $true }
+        }
     }
     else {
         @{ reviewers = @() }
     }
     $body | ConvertTo-Json -Depth 5 | gh api --method PUT "repos/$repoSlug/environments/$environment" --input - --silent
     if ($LASTEXITCODE -ne 0) { throw "Could not configure GitHub Environment $environment." }
-    Write-Host "  = GitHub Environment $environment ($(if ($environment -eq 'prod') { "reviewer $ProdReviewer" } else { 'no protection' }))"
+    Write-Host "  = GitHub Environment $environment ($(if ($environment -eq 'prod') { "reviewer $ProdReviewer, main only" } else { 'no protection' }))"
+
+    if ($environment -eq 'prod') {
+        $policies = Invoke-Native { gh api "repos/$repoSlug/environments/$environment/deployment-branch-policies" --jq '.branch_policies[].name' }
+        if ('main' -notin @($policies)) {
+            Invoke-Native {
+                gh api --method POST "repos/$repoSlug/environments/$environment/deployment-branch-policies" `
+                    -f name=main -f type=branch --silent
+            } | Out-Null
+            Write-Host '  + deployment branch policy main'
+        }
+        else {
+            Write-Host '  = deployment branch policy main'
+        }
+    }
 
     $current = @{}
     $listed = Invoke-Native { gh variable list --env $environment --repo $repoSlug --json name,value } | ConvertFrom-Json

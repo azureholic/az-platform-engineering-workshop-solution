@@ -27,17 +27,29 @@ param locationShort string = 'plc'
 @description('Instance number appended to names.')
 param instance string = '001'
 
-@description('Name of the existing spoke virtual network.')
+@description('Name of the spoke virtual network.')
 param spokeVnetName string = 'vnet-${workload}-${environment}-${location}-${instance}'
 
-@description('Name of the existing subnet that holds private endpoints.')
+@description('Address space of the spoke. Must not overlap the hub or any other spoke peered to it.')
+param spokeAddressPrefix string = '10.21.0.0/16'
+
+@description('Name of the subnet that holds private endpoints.')
 param privateEndpointSubnetName string = 'snet-private-endpoints'
 
-@description('Name of the Container Apps subnet (created here if it does not exist).')
+@description('Address prefix of the private endpoint subnet.')
+param privateEndpointSubnetPrefix string = '10.21.0.0/24'
+
+@description('Name of the Container Apps subnet.')
 param containerAppsSubnetName string = 'snet-containerapps'
 
 @description('Address prefix of the Container Apps subnet; must sit inside the spoke address space.')
 param containerAppsSubnetPrefix string = '10.21.1.0/24'
+
+@description('Resource group of the hub virtual network.')
+param hubResourceGroupName string = 'rg-platform'
+
+@description('Name of the hub virtual network.')
+param hubVnetName string = 'vnet-hub'
 
 @description('Additional VNets (besides the spoke) linked to the SQL Private DNS zone for resolution. A VNet can be linked to only one zone per namespace.')
 param privateDnsExtraLinkVnets array = [
@@ -103,29 +115,46 @@ var sqlServerName = 'sql-${workload}-${environment}-${locationShort}-${uniqueStr
 var sqlDatabaseName = 'sqldb-${workload}-${environment}'
 var sqlPrivateEndpointName = 'pep-sql-${suffix}'
 var sqlPrivateDnsZoneName = 'privatelink${az.environment().suffixes.sqlServerHostname}'
+var hubVnetId = resourceId(subscription().subscriptionId, hubResourceGroupName, 'Microsoft.Network/virtualNetworks', hubVnetName)
 
-resource spokeVnet 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
-  name: spokeVnetName
-}
-
-resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
-  parent: spokeVnet
-  name: privateEndpointSubnetName
-}
-
-// ---------------------------------------------------------------------------------------------
-// Network: Container Apps subnet (delegated) in the existing spoke
-// ---------------------------------------------------------------------------------------------
-
-module containerAppsSubnet 'br/public:avm/res/network/virtual-network/subnet:0.2.0' = {
-  name: 'snet-containerapps-deployment'
+module spokeVnet 'br/public:avm/res/network/virtual-network:0.10.2' = {
+  name: 'spoke-vnet-deployment'
   params: {
-    virtualNetworkName: spokeVnetName
-    name: containerAppsSubnetName
-    addressPrefix: containerAppsSubnetPrefix
-    delegation: 'Microsoft.App/environments'
+    name: spokeVnetName
+    location: location
+    tags: tags
+    addressPrefixes: [
+      spokeAddressPrefix
+    ]
+    subnets: [
+      {
+        name: privateEndpointSubnetName
+        addressPrefix: privateEndpointSubnetPrefix
+      }
+      {
+        name: containerAppsSubnetName
+        addressPrefix: containerAppsSubnetPrefix
+        delegation: 'Microsoft.App/environments'
+      }
+    ]
+    // Peering is created on both sides: spoke -> hub, and hub -> spoke via remotePeeringEnabled.
+    peerings: [
+      {
+        name: 'peer-${workload}-${environment}-${locationShort}-to-hub'
+        remoteVirtualNetworkResourceId: hubVnetId
+        allowForwardedTraffic: true
+        allowVirtualNetworkAccess: true
+        remotePeeringEnabled: true
+        remotePeeringName: 'peer-hub-to-${workload}-${environment}-${locationShort}'
+        remotePeeringAllowForwardedTraffic: true
+        remotePeeringAllowVirtualNetworkAccess: true
+      }
+    ]
   }
 }
+
+var privateEndpointSubnetId = '${spokeVnet.outputs.resourceId}/subnets/${privateEndpointSubnetName}'
+var containerAppsSubnetId = '${spokeVnet.outputs.resourceId}/subnets/${containerAppsSubnetName}'
 
 // ---------------------------------------------------------------------------------------------
 // Identity: runtime user-assigned managed identity for the backend (also the SQL Entra admin)
@@ -179,7 +208,7 @@ module sqlPrivateDnsZone 'br/public:avm/res/network/private-dns-zone:0.8.1' = {
       [
         {
           name: 'link-${spokeVnetName}'
-          virtualNetworkResourceId: spokeVnet.id
+          virtualNetworkResourceId: spokeVnet.outputs.resourceId
           registrationEnabled: true
         }
       ],
@@ -228,7 +257,7 @@ module sqlServer 'br/public:avm/res/sql/server:0.22.1' = {
     privateEndpoints: [
       {
         name: sqlPrivateEndpointName
-        subnetResourceId: privateEndpointSubnet.id
+        subnetResourceId: privateEndpointSubnetId
         privateDnsZoneGroup: {
           privateDnsZoneGroupConfigs: [
             {
@@ -253,7 +282,7 @@ module containerAppsEnvironment 'br/public:avm/res/app/managed-environment:0.16.
     name: environmentName
     location: location
     tags: tags
-    infrastructureSubnetResourceId: containerAppsSubnet.outputs.resourceId
+    infrastructureSubnetResourceId: containerAppsSubnetId
     internal: false
     zoneRedundant: zoneRedundant
     publicNetworkAccess: 'Enabled'
