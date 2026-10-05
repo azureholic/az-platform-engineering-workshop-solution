@@ -101,6 +101,15 @@ var tags = {
   workload: workload
   environment: environment
   role: 'spoke'
+  owner: 'Remco'
+}
+
+// Merges the same tags onto the resource group so CI (which has no subscription-scope rights) keeps them in sync.
+resource resourceGroupTags 'Microsoft.Resources/tags@2021-04-01' = {
+  name: 'default'
+  properties: {
+    tags: tags
+  }
 }
 
 var suffix = '${workload}-${environment}-${locationShort}-${instance}'

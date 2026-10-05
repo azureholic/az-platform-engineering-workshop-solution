@@ -19,6 +19,7 @@ var tags = {
   workload: workload
   environment: environment
   role: 'spoke'
+  owner: 'Remco'
 }
 
 module workloadRg 'br/public:avm/res/resources/resource-group:0.4.4' = {
